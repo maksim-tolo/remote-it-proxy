@@ -2,7 +2,7 @@ const axios = require('axios');
 const proxy = require('http-proxy-middleware');
 const express = require('express');
 const pRetry = require('p-retry');
-const firebase = require('firebase/app');
+const firebase = require('firebase');
 
 const MILLISECONDS_IN_SECOND = 1000;
 
@@ -35,27 +35,34 @@ firebase.initializeApp({
 
 async function restoreSession() {
   try {
-    const session = await firebase.database().ref('session').get();
+    const snapshot = await firebase.database().ref('session').once('value');
+    const session = snapshot.val();
 
     cachedProxyURL = session.proxy;
     cachedToken = session.token;
     tokenExpirationDate = session.tokenExpirationDate;
     proxyExpirationDate = session.proxyExpirationDate;
+
+    console.log('Session has been restored successfully, data:', session);
   } catch (e) {
-    console.log('Unable to restore session');
+    console.log('Unable to restore session, error:', e);
   }
 }
 
 async function saveSession() {
   try {
-    await firebase.database().ref('session').set({
+    const session = {
       proxy: cachedProxyURL,
       token: cachedToken,
       tokenExpirationDate,
       proxyExpirationDate
-    });
+    };
+
+    await firebase.database().ref('session').set(session);
+
+    console.log('Session has been saved successfully, data:', session);
   } catch (e) {
-    console.log('Unable to save session');
+    console.log('Unable to save session, error:', e);
   }
 }
 
