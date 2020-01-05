@@ -2,8 +2,7 @@ const axios = require('axios');
 const proxy = require('http-proxy-middleware');
 const express = require('express');
 const pRetry = require('p-retry');
-
-const app = express();
+const firebase = require('firebase/app');
 
 const MILLISECONDS_IN_SECOND = 1000;
 
@@ -13,12 +12,52 @@ const targetServiceName = process.env.REMOTEIT_TARGET_SERVICE_NAME;
 const developerkey = process.env.REMOTEIT_DEVELOPER_KEY;
 const username = process.env.REMOTEIT_USERNAME;
 const password = process.env.REMOTEIT_PASSWORD;
+const firebaseApiKey = process.env.FIREBASE_API_KEY;
+const firebaseAuthDomain = process.env.FIREBASE_AUTH_DOMAIN;
+const firebaseDatabaseURL = process.env.FIREBASE_DATABASE_URL;
+const firebaseStorageBucket = process.env.FIREBASE_STORAGE_BUCKET;
 
 let cachedProxy;
+let cachedProxyURL;
 let cachedToken;
 
-let tokenRefreshTimeout;
-let proxyRefreshTimeout;
+let tokenExpirationDate;
+let proxyExpirationDate;
+
+const app = express();
+
+firebase.initializeApp({
+  apiKey: firebaseApiKey,
+  authDomain: firebaseAuthDomain,
+  databaseURL: firebaseDatabaseURL,
+  storageBucket: firebaseStorageBucket
+});
+
+async function restoreSession() {
+  try {
+    const session = await firebase.database().ref('session').get();
+
+    cachedProxyURL = session.proxy;
+    cachedToken = session.token;
+    tokenExpirationDate = session.tokenExpirationDate;
+    proxyExpirationDate = session.proxyExpirationDate;
+  } catch (e) {
+    console.log('Unable to restore session');
+  }
+}
+
+async function saveSession() {
+  try {
+    await firebase.database().ref('session').set({
+      proxy: cachedProxyURL,
+      token: cachedToken,
+      tokenExpirationDate,
+      proxyExpirationDate
+    });
+  } catch (e) {
+    console.log('Unable to save session');
+  }
+}
 
 function mutex(fn) {
   let promise;
@@ -76,53 +115,55 @@ async function connectToDevice(token, deviceaddress) {
 }
 
 async function refreshToken() {
-  if (tokenRefreshTimeout) {
-    clearTimeout(tokenRefreshTimeout);
-    tokenRefreshTimeout = null;
-  }
+  const { data } = await loginToRemoteIt();
 
-  const { data, headers } = await loginToRemoteIt();
-  const currentDate = (new Date(headers.date)).valueOf() || Date.now();
-  const expirationDate = data.auth_expiration * MILLISECONDS_IN_SECOND;
-  const timeout = expirationDate - currentDate;
-
+  tokenExpirationDate = data.auth_expiration * MILLISECONDS_IN_SECOND;
   cachedToken = data.token;
-
-  if (timeout) {
-    setTimeout(refreshToken, timeout);
-  }
 }
 
 async function refreshProxy() {
-  if (proxyRefreshTimeout) {
-    clearTimeout(proxyRefreshTimeout);
-    proxyRefreshTimeout = null;
-  }
-
   const { data: { devices } } = await getDevices(cachedToken);
   const { deviceaddress } = devices.find(({ devicealias }) => devicealias === targetServiceName);
   const { data: { connection } } = await connectToDevice(cachedToken, deviceaddress);
   const timeout = connection.expirationsec * MILLISECONDS_IN_SECOND;
 
-  // TODO: Add error handlers for 403 status code
-  cachedProxy = proxy({
-    target: connection.proxy,
-    changeOrigin: true,
-    ws: true
-  });
-
-  if (timeout) {
-    setTimeout(refreshProxy, timeout);
-  }
+  proxyExpirationDate = Date.now() + timeout;
+  cachedProxyURL = connection.proxy;
 }
 
 async function getProxy() {
+  const now = Date.now();
+
+  if (!tokenExpirationDate || !proxyExpirationDate) {
+    await restoreSession();
+  }
+
+  if (tokenExpirationDate && now > tokenExpirationDate) {
+    cachedToken = null;
+  }
+
+  if (proxyExpirationDate && now > proxyExpirationDate) {
+    cachedProxyURL = null;
+    cachedProxy = null;
+  }
+
   if (!cachedProxy) {
     if (!cachedToken) {
       await refreshToken();
     }
 
-    await refreshProxy();
+    if (!cachedProxyURL) {
+      await refreshProxy();
+    }
+
+    await saveSession();
+
+    // TODO: Add error handlers for 403 status code
+    cachedProxy = proxy({
+      target: cachedProxyURL,
+      changeOrigin: true,
+      ws: true
+    });
   }
 
   return cachedProxy;
@@ -136,6 +177,7 @@ app.use(async (req, res, next) => {
       onFailedAttempt: () => {
         cachedToken = null;
         cachedProxy = null;
+        cachedProxyURL = null;
       },
       retries: 5
     });
