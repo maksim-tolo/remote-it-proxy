@@ -24,6 +24,8 @@ let cachedToken;
 let tokenExpirationDate;
 let proxyExpirationDate;
 
+let isSessionRestored = false;
+
 const app = express();
 
 firebase.initializeApp({
@@ -43,9 +45,13 @@ async function restoreSession() {
     tokenExpirationDate = session.tokenExpirationDate;
     proxyExpirationDate = session.proxyExpirationDate;
 
+    isSessionRestored = true;
+
     console.log('Session has been restored successfully, data:', session);
   } catch (e) {
-    console.log('Unable to restore session, error:', e);
+    isSessionRestored = true;
+
+    console.log('Unable to restore session, error:', e.message);
   }
 }
 
@@ -62,7 +68,7 @@ async function saveSession() {
 
     console.log('Session has been saved successfully, data:', session);
   } catch (e) {
-    console.log('Unable to save session, error:', e);
+    console.log('Unable to save session, error:', e.message);
   }
 }
 
@@ -75,13 +81,19 @@ function mutex(fn) {
       return promise;
     }
 
-    promise = fn();
+    try {
+      promise = fn();
 
-    const result = await promise;
+      const result = await promise;
 
-    promise = null;
+      promise = null;
 
-    return result;
+      return result;
+    } catch (e) {
+      promise = null;
+
+      throw e;
+    }
   }
 }
 
@@ -141,7 +153,7 @@ async function refreshProxy() {
 async function getProxy() {
   const now = Date.now();
 
-  if (!tokenExpirationDate || !proxyExpirationDate) {
+  if (!isSessionRestored) {
     await restoreSession();
   }
 
@@ -176,23 +188,29 @@ async function getProxy() {
   return cachedProxy;
 }
 
-const getProxySingleExecution = mutex(getProxy);
+async function getProxyRetryable() {
+  return pRetry(getProxy, {
+    onFailedAttempt: (e) => {
+      console.log('Unable to start the proxy server, trying to refresh the session, error:', e.message);
+
+      cachedToken = null;
+      cachedProxy = null;
+      cachedProxyURL = null;
+    },
+    retries: 5
+  });
+}
+
+const getProxyLocked = mutex(getProxyRetryable);
 
 app.use(async (req, res, next) => {
   try {
-    const proxyMiddleware = await pRetry(getProxySingleExecution, {
-      onFailedAttempt: () => {
-        cachedToken = null;
-        cachedProxy = null;
-        cachedProxyURL = null;
-      },
-      retries: 5
-    });
+    const proxyMiddleware = await getProxyLocked();
 
     return proxyMiddleware(req, res, next);
   } catch (e) {
     res.writeHead(500);
-    res.end('Unable to connect to proxy server');
+    res.end('Unable to connect to the proxy server, error:', e.message);
   }
 });
 
