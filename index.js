@@ -175,7 +175,7 @@ async function getProxy() {
       await refreshProxy();
     }
 
-    await saveSession();
+    saveSession(); // Don't need to wait for this action's ending
 
     // TODO: Add error handlers for 403 status code
     cachedProxy = proxy({
@@ -197,7 +197,8 @@ async function getProxyRetryable() {
       cachedProxy = null;
       cachedProxyURL = null;
     },
-    retries: 5
+    retries: 1,
+    minTimeout: 0
   });
 }
 
